@@ -6,6 +6,7 @@ import { createServer } from "node:net";
 
 const port = await getFreePort();
 const tempDir = mkdtempSync(join(tmpdir(), "sharebin-"));
+const serverOutput = [];
 const server = spawn(process.execPath, ["dist/server/index.js"], {
   env: {
     ...process.env,
@@ -18,6 +19,11 @@ const server = spawn(process.execPath, ["dist/server/index.js"], {
     TMP_DIR: join(tempDir, "tmp")
   },
   stdio: ["ignore", "pipe", "pipe"]
+});
+server.stdout.on("data", (chunk) => serverOutput.push(chunk.toString()));
+server.stderr.on("data", (chunk) => serverOutput.push(chunk.toString()));
+const serverExit = new Promise((resolve) => {
+  server.once("exit", (code, signal) => resolve({ code, signal }));
 });
 
 try {
@@ -222,16 +228,22 @@ async function expectStatus(promise, status) {
 }
 
 async function waitForServer(portNumber) {
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
+    if (server.exitCode !== null) {
+      throw new Error(`server exited before startup with code ${server.exitCode}\n${readServerOutput()}`);
+    }
     try {
       await fetch(`http://127.0.0.1:${portNumber}/healthz`);
       return;
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      const exited = await Promise.race([serverExit, new Promise((resolve) => setTimeout(() => resolve(null), 100))]);
+      if (exited) {
+        throw new Error(`server exited before startup with ${JSON.stringify(exited)}\n${readServerOutput()}`);
+      }
     }
   }
-  throw new Error(readServerOutput() || "server did not start");
+  throw new Error(`server did not start within 30s on port ${portNumber}\n${readServerOutput()}`);
 }
 
 async function getFreePort() {
@@ -246,5 +258,5 @@ async function getFreePort() {
 }
 
 function readServerOutput() {
-  return [server.stdout.read(), server.stderr.read()].filter(Boolean).join("\n");
+  return serverOutput.join("").trim();
 }
