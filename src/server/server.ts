@@ -279,7 +279,7 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     return getFile(id)!;
   }
 
-  async function saveUpload(part: MultipartFile, user: UserRow, fields: Record<string, string>): Promise<FileRow> {
+  async function saveUpload(part: MultipartFile, user: UserRow, fields: Record<string, string>, request: FastifyRequest, uploadId: string): Promise<FileRow> {
     const originalFilename = part.filename || "file";
     const tmpPath = path.join(config.tmpDir, `${publicId()}.upload`);
     const hash = crypto.createHash("sha256");
@@ -292,7 +292,45 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
       }
     });
 
-    await pipeline(part.file, meter, fs.createWriteStream(tmpPath));
+    request.log.info(
+      {
+        uploadId,
+        filename: originalFilename,
+        fieldname: part.fieldname,
+        mimetype: part.mimetype,
+        encoding: part.encoding
+      },
+      "upload file stream started"
+    );
+
+    try {
+      await pipeline(part.file, meter, fs.createWriteStream(tmpPath));
+      request.log.info(
+        {
+          uploadId,
+          filename: originalFilename,
+          sizeBytes,
+          truncated: Boolean((part.file as typeof part.file & { truncated?: boolean }).truncated)
+        },
+        "upload file stream completed"
+      );
+    } catch (error) {
+      await rm(tmpPath, { force: true });
+      request.log.warn(
+        {
+          err: error,
+          uploadId,
+          filename: originalFilename,
+          sizeBytes,
+          contentLength: request.headers["content-length"] ?? null,
+          aborted: request.raw.aborted,
+          socketDestroyed: request.socket.destroyed
+        },
+        "upload file stream failed"
+      );
+      throw error;
+    }
+
     const visibility = normalizeVisibility(fields.visibility, fields.password);
     return createStoredFile(user, {
       originalFilename,
@@ -330,6 +368,32 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     const user = requireUser(request, reply);
     if (!user) return;
 
+    const uploadId = publicId();
+    const startedAt = Date.now();
+    let aborted = false;
+    request.raw.once("aborted", () => {
+      aborted = true;
+      request.log.warn(
+        {
+          uploadId,
+          contentLength: request.headers["content-length"] ?? null,
+          bytesRead: request.socket.bytesRead,
+          maxFileSizeBytes: config.maxFileSizeBytes
+        },
+        "upload request aborted by client or proxy"
+      );
+    });
+    request.log.info(
+      {
+        uploadId,
+        contentLength: request.headers["content-length"] ?? null,
+        contentType: request.headers["content-type"] ?? null,
+        maxFileSizeBytes: config.maxFileSizeBytes,
+        route: request.url
+      },
+      "upload request started"
+    );
+
     const fields: Record<string, string> = {};
     const files: FileRow[] = [];
 
@@ -340,7 +404,7 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
           continue;
         }
         if (part.type === "file" && part.fieldname === "files") {
-          const row = await saveUpload(part, user, fields);
+          const row = await saveUpload(part, user, fields, request, uploadId);
           files.push(row);
           audit(request, "file.upload", "file", row.id, user.id, {
             filename: row.original_filename,
@@ -349,11 +413,33 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
         }
       }
     } catch (error) {
-      request.log.warn({ error }, "upload failed");
+      request.log.warn(
+        {
+          err: error,
+          uploadId,
+          aborted,
+          contentLength: request.headers["content-length"] ?? null,
+          bytesRead: request.socket.bytesRead,
+          filesCompleted: files.length,
+          elapsedMs: Date.now() - startedAt,
+          maxFileSizeBytes: config.maxFileSizeBytes
+        },
+        "upload failed"
+      );
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Upload failed" });
     }
 
     if (!files.length) return reply.code(400).send({ error: "No files uploaded" });
+
+    request.log.info(
+      {
+        uploadId,
+        filesCompleted: files.length,
+        totalSizeBytes: files.reduce((sum, file) => sum + file.size_bytes, 0),
+        elapsedMs: Date.now() - startedAt
+      },
+      "upload request completed"
+    );
 
     if (redirectAfter) return reply.redirect(`/v/${encodeURIComponent(files[0].id)}`);
 
