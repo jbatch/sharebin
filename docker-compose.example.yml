@@ -15,4 +15,4 @@ services:
       UPLOAD_RATE_LIMIT: "60"
       TRUST_PROXY: "true"
     volumes:
-      - /mnt/nas/file-share:/data
+      - ./data:/data

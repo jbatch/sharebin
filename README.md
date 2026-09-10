@@ -56,7 +56,7 @@ docker run --rm -p 8080:8080 \
   sharebin
 ```
 
-For a home server, start from `docker-compose.example.yml` and bind mount the NAS-backed data path to `/data`.
+For a home server, start from `docker-compose.example.yml` and bind mount `./data` or your preferred persistent host directory to `/data`.
 
 ## Backup
 
