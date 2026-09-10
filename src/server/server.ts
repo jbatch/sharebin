@@ -72,6 +72,19 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     }
   });
 
+  app.addHook("onRequest", async (request) => {
+    if (request.method !== "POST" || (request.url.split("?")[0] !== "/api/files" && request.url.split("?")[0] !== "/share")) return;
+    request.log.info(
+      {
+        contentLength: request.headers["content-length"] ?? null,
+        contentType: request.headers["content-type"] ?? null,
+        expect: request.headers.expect ?? null,
+        maxFileSizeBytes: config.maxFileSizeBytes
+      },
+      "upload request reached server"
+    );
+  });
+
   app.addHook("preHandler", async (request, reply) => {
     if (!requireOrigin(request, config.appBaseUrl)) {
       return reply.code(403).send({ error: "Bad origin" });
@@ -226,7 +239,13 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
   ): Promise<FileRow> {
     if (input.sizeBytes > config.maxFileSizeBytes) {
       await rm(input.tmpPath, { force: true });
-      throw new Error("File is too large");
+      const error = new Error(`File is too large (${input.sizeBytes} bytes, max ${config.maxFileSizeBytes} bytes)`);
+      Object.assign(error, {
+        code: "FILE_TOO_LARGE",
+        sizeBytes: input.sizeBytes,
+        maxFileSizeBytes: config.maxFileSizeBytes
+      });
+      throw error;
     }
 
     const usedBytes = db
@@ -416,6 +435,8 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
       request.log.warn(
         {
           err: error,
+          errorCode: typeof error === "object" && error && "code" in error ? error.code : undefined,
+          sizeBytes: typeof error === "object" && error && "sizeBytes" in error ? error.sizeBytes : undefined,
           uploadId,
           aborted,
           contentLength: request.headers["content-length"] ?? null,
@@ -426,7 +447,16 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
         },
         "upload failed"
       );
-      return reply.code(400).send({ error: error instanceof Error ? error.message : "Upload failed" });
+      const errorPayload =
+        typeof error === "object" && error && "code" in error && error.code === "FILE_TOO_LARGE"
+          ? {
+              error: error instanceof Error ? error.message : "File is too large",
+              code: "FILE_TOO_LARGE",
+              sizeBytes: "sizeBytes" in error ? error.sizeBytes : undefined,
+              maxFileSizeBytes: config.maxFileSizeBytes
+            }
+          : { error: error instanceof Error ? error.message : "Upload failed" };
+      return reply.code(400).send(errorPayload);
     }
 
     if (!files.length) return reply.code(400).send({ error: "No files uploaded" });

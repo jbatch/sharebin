@@ -27,6 +27,12 @@ type UploadItem = {
   error?: string;
   result?: FileDto;
 };
+type ErrorPayload = {
+  error?: string;
+  code?: string;
+  sizeBytes?: number;
+  maxFileSizeBytes?: number;
+};
 
 type TabName = "upload" | "files" | "admin";
 type ExpiryPreset = "never" | "1d" | "7d" | "30d";
@@ -501,7 +507,9 @@ function UploadScreen({ maxFileSizeBytes, onUploaded }: { maxFileSizeBytes: numb
               <div className="item-head">
                 <div className="min">
                   <strong>{item.file.name}</strong>
-                  <span>{formatBytes(item.file.size)}</span>
+                  <span>
+                    {formatBytes(item.file.size)} of {formatBytes(maxFileSizeBytes)} max
+                  </span>
                 </div>
                 <button className="icon-button" onClick={() => setItems((current) => current.filter((next) => next.id !== item.id))} title="Remove">
                   <X size={15} />
@@ -571,7 +579,7 @@ function uploadOne(
       onUploaded();
     } else {
       const payload = safeJson(xhr.responseText);
-      setItems((current) => current.map((next) => (next.id === item.id ? { ...next, status: "error", error: payload?.error ?? "Upload failed" } : next)));
+      setItems((current) => current.map((next) => (next.id === item.id ? { ...next, status: "error", error: uploadErrorMessage(payload) } : next)));
     }
   };
   xhr.onerror = () => {
@@ -582,12 +590,20 @@ function uploadOne(
   xhr.send(form);
 }
 
-function safeJson(text: string): { error?: string } | null {
+function safeJson(text: string): ErrorPayload | null {
   try {
-    return JSON.parse(text) as { error?: string };
+    return JSON.parse(text) as ErrorPayload;
   } catch {
     return null;
   }
+}
+
+function uploadErrorMessage(payload: ErrorPayload | null): string {
+  if (!payload) return "Upload failed";
+  if (payload.code === "FILE_TOO_LARGE" && typeof payload.sizeBytes === "number" && typeof payload.maxFileSizeBytes === "number") {
+    return `File is too large: ${formatBytes(payload.sizeBytes)} received, max ${formatBytes(payload.maxFileSizeBytes)}`;
+  }
+  return payload.error ?? "Upload failed";
 }
 
 function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
