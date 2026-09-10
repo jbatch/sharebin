@@ -7,6 +7,7 @@ export type AppConfig = {
   tmpDir: string;
   sessionSecret: string;
   maxFileSizeBytes: number;
+  chunkSizeBytes: number;
   defaultUserQuotaBytes: number;
   uploadRateLimit: number;
   trustProxy: boolean;
@@ -33,13 +34,15 @@ export function loadConfig(): AppConfig {
     throw new Error("SESSION_SECRET must be set to at least 32 characters in production");
   }
 
+  const maxFileSizeBytes = readInt("MAX_FILE_SIZE_BYTES", 200 * 1024 * 1024);
   return {
     appBaseUrl: process.env.APP_BASE_URL ?? "http://localhost:8080",
     databasePath: process.env.DATABASE_PATH ?? path.join(dataDir, "app.db"),
     filesDir: process.env.FILES_DIR ?? path.join(dataDir, "files"),
     tmpDir: process.env.TMP_DIR ?? path.join(dataDir, "tmp"),
     sessionSecret: sessionSecret || "dev-only-sharebin-session-secret",
-    maxFileSizeBytes: readInt("MAX_FILE_SIZE_BYTES", 200 * 1024 * 1024),
+    maxFileSizeBytes,
+    chunkSizeBytes: Math.min(readInt("CHUNK_SIZE_BYTES", 50 * 1024 * 1024), maxFileSizeBytes),
     defaultUserQuotaBytes: readInt("DEFAULT_USER_QUOTA_BYTES", 10 * 1024 * 1024 * 1024),
     uploadRateLimit: readInt("UPLOAD_RATE_LIMIT", 60),
     trustProxy: process.env.TRUST_PROXY === "true",

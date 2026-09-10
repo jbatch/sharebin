@@ -57,6 +57,32 @@ export type SessionRow = {
   created_at: string;
 };
 
+export type UploadSessionRow = {
+  id: string;
+  owner_user_id: string;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  chunk_size_bytes: number;
+  chunk_count: number;
+  visibility: FileVisibility;
+  password_hash: string | null;
+  expires_at: string | null;
+  status: "uploading" | "complete" | "cancelled";
+  file_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type UploadChunkRow = {
+  upload_id: string;
+  chunk_index: number;
+  size_bytes: number;
+  storage_path: string;
+  sha256: string;
+  created_at: string;
+};
+
 export function openDatabase(databasePath: string): Db {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -130,6 +156,35 @@ export function migrate(db: Db): void {
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS upload_sessions (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      original_filename TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      chunk_size_bytes INTEGER NOT NULL,
+      chunk_count INTEGER NOT NULL,
+      visibility TEXT NOT NULL CHECK(visibility IN ('public', 'private', 'password')),
+      password_hash TEXT,
+      expires_at TEXT,
+      status TEXT NOT NULL CHECK(status IN ('uploading', 'complete', 'cancelled')),
+      file_id TEXT REFERENCES files(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS upload_chunks (
+      upload_id TEXT NOT NULL REFERENCES upload_sessions(id) ON DELETE CASCADE,
+      chunk_index INTEGER NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      storage_path TEXT NOT NULL,
+      sha256 TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (upload_id, chunk_index)
+    );
+
+    CREATE INDEX IF NOT EXISTS upload_sessions_owner_status_idx ON upload_sessions(owner_user_id, status, created_at);
 
     CREATE TABLE IF NOT EXISTS audit_events (
       id TEXT PRIMARY KEY,

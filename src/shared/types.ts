@@ -61,3 +61,14 @@ export type PublicFileResponse = {
 export type UploadResponse = {
   files: FileDto[];
 };
+
+export type ChunkedUploadSessionResponse = {
+  uploadId: string;
+  chunkSizeBytes: number;
+  chunkCount: number;
+  receivedChunks: number;
+};
+
+export type ChunkedUploadCompleteResponse = {
+  file: FileDto;
+};

@@ -17,13 +17,22 @@ import {
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FileDto, FileVisibility, InviteDto, MeResponse, PublicFileResponse, UserDto } from "../shared/types.js";
+import type {
+  ChunkedUploadCompleteResponse,
+  ChunkedUploadSessionResponse,
+  FileDto,
+  FileVisibility,
+  InviteDto,
+  MeResponse,
+  PublicFileResponse,
+  UserDto
+} from "../shared/types.js";
 
 type UploadItem = {
   id: string;
   file: File;
   progress: number;
-  status: "queued" | "uploading" | "done" | "error";
+  status: "queued" | "uploading" | "assembling" | "done" | "error";
   error?: string;
   result?: FileDto;
 };
@@ -47,6 +56,7 @@ type FileSettingsPatch = {
 type PublicLookup = { kind: "id" | "vanity"; value: string };
 
 const fallbackMaxFileSizeBytes = 200 * 1024 * 1024;
+const chunkedUploadThresholdBytes = 50 * 1024 * 1024;
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = init.body instanceof FormData ? init.headers : init.body ? { "Content-Type": "application/json", ...init.headers } : init.headers;
@@ -369,7 +379,7 @@ function UploadScreen({ maxFileSizeBytes, onUploaded }: { maxFileSizeBytes: numb
   }
 
   const uploadableCount = items.filter((item) => item.status === "queued" || item.status === "error").length;
-  const uploadingCount = items.filter((item) => item.status === "uploading").length;
+  const uploadingCount = items.filter((item) => item.status === "uploading" || item.status === "assembling").length;
   const uploadButtonLabel = uploadingCount ? "Uploading..." : uploadableCount ? `Upload ${uploadableCount} ${uploadableCount === 1 ? "file" : "files"}` : "Uploaded";
 
   return (
@@ -515,11 +525,12 @@ function UploadScreen({ maxFileSizeBytes, onUploaded }: { maxFileSizeBytes: numb
                   <X size={15} />
                 </button>
               </div>
-              {item.status === "uploading" && (
+              {(item.status === "uploading" || item.status === "assembling") && (
                 <div className="progress">
                   <span style={{ width: `${item.progress}%` }} />
                 </div>
               )}
+              {item.status === "assembling" && <div className="upload-note">Finishing upload...</div>}
               {item.status === "error" && (
                 <div className="row-error">
                   <span>{item.error}</span>
@@ -553,7 +564,7 @@ function LinkRow({ label, value, onCopy }: { label: string; value: string; onCop
   );
 }
 
-function uploadOne(
+async function uploadOne(
   item: UploadItem,
   visibility: FileVisibility,
   expiry: ExpiryPreset,
@@ -561,33 +572,108 @@ function uploadOne(
   setItems: React.Dispatch<React.SetStateAction<UploadItem[]>>,
   onUploaded: () => void
 ) {
-  const xhr = new XMLHttpRequest();
-  const form = new FormData();
-  form.append("visibility", visibility);
-  form.append("expiry", expiry);
-  if (visibility === "password") form.append("password", password);
-  form.append("files", item.file);
   setItems((current) => current.map((next) => (next.id === item.id ? { ...next, status: "uploading", progress: 2, error: undefined } : next)));
-  xhr.upload.onprogress = (event) => {
-    if (!event.lengthComputable) return;
-    setItems((current) => current.map((next) => (next.id === item.id ? { ...next, progress: Math.round((event.loaded / event.total) * 100) } : next)));
-  };
-  xhr.onload = () => {
-    if (xhr.status >= 200 && xhr.status < 300) {
-      const result = JSON.parse(xhr.responseText) as { files: FileDto[] };
-      setItems((current) => current.map((next) => (next.id === item.id ? { ...next, status: "done", progress: 100, result: result.files[0] } : next)));
-      onUploaded();
-    } else {
-      const payload = safeJson(xhr.responseText);
-      setItems((current) => current.map((next) => (next.id === item.id ? { ...next, status: "error", error: uploadErrorMessage(payload) } : next)));
-    }
-  };
-  xhr.onerror = () => {
-    setItems((current) => current.map((next) => (next.id === item.id ? { ...next, status: "error", error: "Upload failed" } : next)));
-  };
-  xhr.open("POST", "/api/files");
-  xhr.withCredentials = true;
-  xhr.send(form);
+  try {
+    const file =
+      item.file.size > chunkedUploadThresholdBytes
+        ? await uploadChunkedOne(item, visibility, expiry, password, setItems)
+        : await uploadMultipartOne(item, visibility, expiry, password, setItems);
+    setItems((current) => current.map((next) => (next.id === item.id ? { ...next, status: "done", progress: 100, result: file } : next)));
+    onUploaded();
+  } catch (error) {
+    setItems((current) =>
+      current.map((next) => (next.id === item.id ? { ...next, status: "error", error: error instanceof Error ? error.message : "Upload failed" } : next))
+    );
+  }
+}
+
+function uploadMultipartOne(
+  item: UploadItem,
+  visibility: FileVisibility,
+  expiry: ExpiryPreset,
+  password: string,
+  setItems: React.Dispatch<React.SetStateAction<UploadItem[]>>
+): Promise<FileDto> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const form = new FormData();
+    form.append("visibility", visibility);
+    form.append("expiry", expiry);
+    if (visibility === "password") form.append("password", password);
+    form.append("files", item.file);
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      setItems((current) => current.map((next) => (next.id === item.id ? { ...next, progress: Math.round((event.loaded / event.total) * 100) } : next)));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const result = JSON.parse(xhr.responseText) as { files: FileDto[] };
+        resolve(result.files[0]);
+        return;
+      }
+      reject(new Error(uploadErrorMessage(safeJson(xhr.responseText))));
+    };
+    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.open("POST", "/api/files");
+    xhr.withCredentials = true;
+    xhr.send(form);
+  });
+}
+
+async function uploadChunkedOne(
+  item: UploadItem,
+  visibility: FileVisibility,
+  expiry: ExpiryPreset,
+  password: string,
+  setItems: React.Dispatch<React.SetStateAction<UploadItem[]>>
+): Promise<FileDto> {
+  const session = await api<ChunkedUploadSessionResponse>("/api/uploads", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: item.file.name,
+      contentType: item.file.type || "application/octet-stream",
+      sizeBytes: item.file.size,
+      visibility,
+      expiry,
+      password: visibility === "password" ? password : undefined
+    })
+  });
+
+  for (let index = 0; index < session.chunkCount; index += 1) {
+    const start = index * session.chunkSizeBytes;
+    const end = Math.min(start + session.chunkSizeBytes, item.file.size);
+    const chunk = item.file.slice(start, end);
+    await uploadChunk(session.uploadId, index, chunk, (loaded) => {
+      const uploadedBytes = Math.min(start + loaded, item.file.size);
+      const progress = Math.max(2, Math.min(98, Math.round((uploadedBytes / item.file.size) * 98)));
+      setItems((current) => current.map((next) => (next.id === item.id ? { ...next, progress } : next)));
+    });
+  }
+
+  setItems((current) => current.map((next) => (next.id === item.id ? { ...next, status: "assembling", progress: 99 } : next)));
+  const completed = await api<ChunkedUploadCompleteResponse>(`/api/uploads/${encodeURIComponent(session.uploadId)}/complete`, { method: "POST" });
+  return completed.file;
+}
+
+function uploadChunk(uploadId: string, chunkIndex: number, chunk: Blob, onProgress: (loaded: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+        return;
+      }
+      reject(new Error(uploadErrorMessage(safeJson(xhr.responseText))));
+    };
+    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.open("PUT", `/api/uploads/${encodeURIComponent(uploadId)}/chunks/${chunkIndex}`);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.send(chunk);
+  });
 }
 
 function safeJson(text: string): ErrorPayload | null {

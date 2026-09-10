@@ -40,6 +40,7 @@ Production requires `SESSION_SECRET` with at least 32 characters.
 | `FILES_DIR` | `/data/files` in production, `.data/files` in development |
 | `TMP_DIR` | `/data/tmp` in production, `.data/tmp` in development |
 | `MAX_FILE_SIZE_BYTES` | `209715200` |
+| `CHUNK_SIZE_BYTES` | `52428800` |
 | `DEFAULT_USER_QUOTA_BYTES` | `10737418240` |
 | `UPLOAD_RATE_LIMIT` | `60` |
 | `TRUST_PROXY` | `false` |

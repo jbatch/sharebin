@@ -16,7 +16,8 @@ const server = spawn(process.execPath, ["dist/server/index.js"], {
     PORT: String(port),
     DATABASE_PATH: join(tempDir, "app.db"),
     FILES_DIR: join(tempDir, "files"),
-    TMP_DIR: join(tempDir, "tmp")
+    TMP_DIR: join(tempDir, "tmp"),
+    CHUNK_SIZE_BYTES: "8"
   },
   stdio: ["ignore", "pipe", "pipe"]
 });
@@ -62,6 +63,41 @@ try {
 
   const listed = await fetchJson("/api/files", { headers: { cookie } });
   if (!listed.files.some((item) => item.id === file.id)) throw new Error("uploaded file missing from list");
+
+  const chunkedBytes = new TextEncoder().encode("chunked upload works\n");
+  const chunkedSession = await fetchJson("/api/uploads", {
+    method: "POST",
+    headers: { cookie },
+    body: JSON.stringify({
+      filename: "chunked.txt",
+      contentType: "text/plain",
+      sizeBytes: chunkedBytes.byteLength,
+      visibility: "public",
+      expiry: "never"
+    })
+  });
+  if (chunkedSession.chunkSizeBytes !== 8 || chunkedSession.chunkCount !== 3) {
+    throw new Error("chunked upload session did not use expected test chunking");
+  }
+  for (let index = 0; index < chunkedSession.chunkCount; index += 1) {
+    const start = index * chunkedSession.chunkSizeBytes;
+    const end = Math.min(start + chunkedSession.chunkSizeBytes, chunkedBytes.byteLength);
+    const response = await fetch(`http://127.0.0.1:${port}/api/uploads/${chunkedSession.uploadId}/chunks/${index}`, {
+      method: "PUT",
+      headers: { cookie, "content-type": "application/octet-stream" },
+      body: chunkedBytes.slice(start, end)
+    });
+    if (response.status !== 200) throw new Error(`chunk ${index} upload failed: ${response.status} ${await response.text()}`);
+  }
+  const completedChunked = await fetchJson(`/api/uploads/${chunkedSession.uploadId}/complete`, {
+    method: "POST",
+    headers: { cookie },
+    body: JSON.stringify({})
+  });
+  if (!completedChunked.file?.directUrl) throw new Error("chunked upload did not create a file");
+  const chunkedDownload = await fetch(completedChunked.file.directUrl);
+  if (chunkedDownload.status !== 200) throw new Error(`chunked download failed: ${chunkedDownload.status}`);
+  if ((await chunkedDownload.text()) !== "chunked upload works\n") throw new Error("chunked upload body mismatch");
 
   const publicFile = await fetchJson(`/api/public/files/${file.id}`);
   if (publicFile.status !== "available") throw new Error(`expected public file available, got ${publicFile.status}`);

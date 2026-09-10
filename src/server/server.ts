@@ -5,14 +5,15 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { fileTypeFromFile } from "file-type";
 import crypto from "node:crypto";
+import { once } from "node:events";
 import fs from "node:fs";
 import { rm, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Transform } from "node:stream";
+import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import type { FileVisibility, UploadResponse } from "../shared/types.js";
+import type { ChunkedUploadCompleteResponse, ChunkedUploadSessionResponse, FileVisibility, UploadResponse } from "../shared/types.js";
 import type { AppConfig } from "./config.js";
-import type { Db, FileRow, InviteRow, UserRow } from "./db.js";
+import type { Db, FileRow, InviteRow, UploadChunkRow, UploadSessionRow, UserRow } from "./db.js";
 import { nowIso, openDatabase } from "./db.js";
 import {
   canOwnFile,
@@ -50,6 +51,12 @@ type AuthContext = {
 };
 
 const passwordCookiePrefix = "sharebin_file_";
+const uploadSessionTtlMs = 24 * 60 * 60 * 1000;
+const chunkOverheadBytes = 1024 * 1024;
+
+function chunkBodyLimit(chunkSizeBytes: number): number {
+  return chunkSizeBytes + chunkOverheadBytes;
+}
 
 export async function buildServer({ config, db = openDatabase(config.databasePath) }: ServerOptions): Promise<FastifyInstance> {
   fs.mkdirSync(config.filesDir, { recursive: true });
@@ -57,7 +64,8 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
 
   const app = Fastify({
     logger: true,
-    trustProxy: config.trustProxy
+    trustProxy: config.trustProxy,
+    bodyLimit: chunkBodyLimit(config.chunkSizeBytes)
   });
 
   await app.register(cookie, { secret: config.sessionSecret });
@@ -71,9 +79,16 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
       files: 20
     }
   });
+  app.addContentTypeParser("application/octet-stream", (_request, payload, done) => {
+    done(null, payload);
+  });
 
   app.addHook("onRequest", async (request) => {
-    if (request.method !== "POST" || (request.url.split("?")[0] !== "/api/files" && request.url.split("?")[0] !== "/share")) return;
+    const routePath = request.url.split("?")[0];
+    const isUploadRequest =
+      (request.method === "POST" && (routePath === "/api/files" || routePath === "/share")) ||
+      (request.method === "PUT" && routePath.startsWith("/api/uploads/"));
+    if (!isUploadRequest) return;
     request.log.info(
       {
         contentLength: request.headers["content-length"] ?? null,
@@ -233,6 +248,8 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
       visibility: FileVisibility;
       expiry: unknown;
       password?: string;
+      passwordHash?: string | null;
+      expiresAt?: string | null;
       forcedMimeType?: string;
       forcedDetectedType?: string;
     }
@@ -268,7 +285,8 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     const detected = input.forcedMimeType ? null : await fileTypeFromFile(input.tmpPath);
     const detectedType = input.forcedDetectedType ?? detected?.mime ?? fallbackMime(originalFilename);
     const mimeType = input.forcedMimeType ?? detectedType;
-    const passwordHash = input.visibility === "password" && input.password ? await hashPassword(input.password) : null;
+    const passwordHash = input.passwordHash ?? (input.visibility === "password" && input.password ? await hashPassword(input.password) : null);
+    const expiresAt = input.expiresAt === undefined ? parseExpiry(input.expiry) : input.expiresAt;
     const now = nowIso();
     fs.mkdirSync(path.dirname(finalPath), { recursive: true });
     await rename(input.tmpPath, finalPath);
@@ -290,7 +308,7 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
       input.sha256,
       input.visibility,
       passwordHash,
-      parseExpiry(input.expiry),
+      expiresAt,
       now,
       now
     );
@@ -383,6 +401,93 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     });
   }
 
+  function getUploadSession(uploadId: string): UploadSessionRow | null {
+    return (
+      (db
+        .prepare("SELECT * FROM upload_sessions WHERE id = ?")
+        .get(uploadId) as UploadSessionRow | undefined) ?? null
+    );
+  }
+
+  function uploadTempDir(uploadId: string): string {
+    if (!/^[A-Za-z0-9_-]+$/.test(uploadId)) throw new Error("Invalid upload id");
+    return path.join(config.tmpDir, "uploads", uploadId);
+  }
+
+  function chunkTempPath(uploadId: string, chunkIndex: number): string {
+    return path.join(uploadTempDir(uploadId), `${String(chunkIndex).padStart(6, "0")}.part`);
+  }
+
+  function expectedChunkSize(session: UploadSessionRow, chunkIndex: number): number {
+    if (chunkIndex === session.chunk_count - 1) {
+      return session.size_bytes - session.chunk_size_bytes * (session.chunk_count - 1);
+    }
+    return session.chunk_size_bytes;
+  }
+
+  function userStorageBytes(userId: string): number {
+    const usedBytes = db
+      .prepare("SELECT COALESCE(SUM(size_bytes), 0) AS used FROM files WHERE owner_user_id = ? AND deleted_at IS NULL")
+      .get(userId) as { used: number };
+    return usedBytes.used;
+  }
+
+  function uploadErrorPayload(error: unknown) {
+    return typeof error === "object" && error && "code" in error && error.code === "FILE_TOO_LARGE"
+      ? {
+          error: error instanceof Error ? error.message : "File is too large",
+          code: "FILE_TOO_LARGE",
+          sizeBytes: "sizeBytes" in error ? error.sizeBytes : undefined,
+          maxFileSizeBytes: config.maxFileSizeBytes
+        }
+      : { error: error instanceof Error ? error.message : "Upload failed" };
+  }
+
+  async function writeChunkBody(source: Readable, tmpPath: string): Promise<{ sizeBytes: number; hash: string }> {
+    const hash = crypto.createHash("sha256");
+    let sizeBytes = 0;
+    const meter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        sizeBytes += chunk.length;
+        hash.update(chunk);
+        callback(null, chunk);
+      }
+    });
+    await pipeline(source, meter, fs.createWriteStream(tmpPath));
+    return { sizeBytes, hash: hash.digest("hex") };
+  }
+
+  async function appendFileToWriteStream(sourcePath: string, output: fs.WriteStream, hash: crypto.Hash): Promise<number> {
+    let sizeBytes = 0;
+    for await (const chunk of fs.createReadStream(sourcePath)) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      sizeBytes += buffer.length;
+      hash.update(buffer);
+      if (!output.write(buffer)) {
+        await once(output, "drain");
+      }
+    }
+    return sizeBytes;
+  }
+
+  async function cleanupUploadSession(uploadId: string, deleteSessionRow = true): Promise<void> {
+    const chunks = db.prepare("SELECT * FROM upload_chunks WHERE upload_id = ?").all(uploadId) as UploadChunkRow[];
+    await Promise.all(chunks.map((chunk) => rm(chunk.storage_path, { force: true })));
+    await rm(uploadTempDir(uploadId), { recursive: true, force: true });
+    db.prepare("DELETE FROM upload_chunks WHERE upload_id = ?").run(uploadId);
+    if (deleteSessionRow) db.prepare("DELETE FROM upload_sessions WHERE id = ?").run(uploadId);
+  }
+
+  async function cleanupStaleUploadSessions(): Promise<void> {
+    const cutoff = new Date(Date.now() - uploadSessionTtlMs).toISOString();
+    const stale = db
+      .prepare("SELECT * FROM upload_sessions WHERE (status IN ('uploading', 'cancelled') AND created_at <= ?) OR (status = 'complete' AND updated_at <= ?)")
+      .all(cutoff, cutoff) as UploadSessionRow[];
+    for (const session of stale) {
+      await cleanupUploadSession(session.id, true);
+    }
+  }
+
   async function handleUpload(request: FastifyRequest, reply: FastifyReply, redirectAfter = false) {
     const user = requireUser(request, reply);
     if (!user) return;
@@ -447,16 +552,7 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
         },
         "upload failed"
       );
-      const errorPayload =
-        typeof error === "object" && error && "code" in error && error.code === "FILE_TOO_LARGE"
-          ? {
-              error: error instanceof Error ? error.message : "File is too large",
-              code: "FILE_TOO_LARGE",
-              sizeBytes: "sizeBytes" in error ? error.sizeBytes : undefined,
-              maxFileSizeBytes: config.maxFileSizeBytes
-            }
-          : { error: error instanceof Error ? error.message : "Upload failed" };
-      return reply.code(400).send(errorPayload);
+      return reply.code(400).send(uploadErrorPayload(error));
     }
 
     if (!files.length) return reply.code(400).send({ error: "No files uploaded" });
@@ -614,6 +710,216 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     audit(request, "invite.accept", "invite", invite.id, userId);
     const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as UserRow;
     return { user: userDto(user) };
+  });
+
+  app.post(
+    "/api/uploads",
+    { config: { rateLimit: { max: config.uploadRateLimit, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const user = requireUser(request, reply);
+      if (!user) return;
+      const body = request.body as {
+        filename?: string;
+        contentType?: string;
+        sizeBytes?: number;
+        visibility?: FileVisibility;
+        expiry?: unknown;
+        password?: string;
+      };
+      const originalFilename = body.filename?.trim() || "file";
+      const sizeBytes = Number(body.sizeBytes);
+      if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
+        return reply.code(400).send({ error: "Valid file size is required" });
+      }
+      if (sizeBytes > config.maxFileSizeBytes) {
+        return reply.code(413).send({
+          error: `File is too large (${sizeBytes} bytes, max ${config.maxFileSizeBytes} bytes)`,
+          code: "FILE_TOO_LARGE",
+          sizeBytes,
+          maxFileSizeBytes: config.maxFileSizeBytes
+        });
+      }
+      if (userStorageBytes(user.id) + sizeBytes > config.defaultUserQuotaBytes) {
+        return reply.code(400).send({ error: "Storage quota exceeded" });
+      }
+
+      const visibility = normalizeVisibility(body.visibility, body.password);
+      if (visibility === "password" && !body.password) {
+        return reply.code(400).send({ error: "Password uploads require a password" });
+      }
+      const sessionChunkSize = config.chunkSizeBytes;
+      const uploadId = publicId();
+      const now = nowIso();
+      const expiresAt = parseExpiry(body.expiry);
+      fs.mkdirSync(uploadTempDir(uploadId), { recursive: true });
+      db.prepare(
+        `INSERT INTO upload_sessions
+         (id, owner_user_id, original_filename, mime_type, size_bytes, chunk_size_bytes, chunk_count,
+          visibility, password_hash, expires_at, status, file_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploading', NULL, ?, ?)`
+      ).run(
+        uploadId,
+        user.id,
+        originalFilename,
+        body.contentType || "application/octet-stream",
+        sizeBytes,
+        sessionChunkSize,
+        Math.ceil(sizeBytes / sessionChunkSize),
+        visibility,
+        visibility === "password" && body.password ? await hashPassword(body.password) : null,
+        expiresAt,
+        now,
+        now
+      );
+      request.log.info({ uploadId, filename: originalFilename, sizeBytes, chunkSizeBytes: sessionChunkSize }, "chunked upload session created");
+      const response: ChunkedUploadSessionResponse = {
+        uploadId,
+        chunkSizeBytes: sessionChunkSize,
+        chunkCount: Math.ceil(sizeBytes / sessionChunkSize),
+        receivedChunks: 0
+      };
+      return reply.send(response);
+    }
+  );
+
+  app.put(
+    "/api/uploads/:id/chunks/:chunkIndex",
+    { config: { rateLimit: { max: config.uploadRateLimit, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const user = requireUser(request, reply);
+      if (!user) return;
+      const { id, chunkIndex: rawChunkIndex } = request.params as { id: string; chunkIndex: string };
+      const chunkIndex = Number(rawChunkIndex);
+      const session = getUploadSession(id);
+      if (!session || session.owner_user_id !== user.id) return reply.code(404).send({ error: "Upload not found" });
+      if (session.status !== "uploading") return reply.code(409).send({ error: "Upload is not accepting chunks" });
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.chunk_count) {
+        return reply.code(400).send({ error: "Invalid chunk index" });
+      }
+
+      const expectedSize = expectedChunkSize(session, chunkIndex);
+      const contentLength = Number(request.headers["content-length"]);
+      if (Number.isFinite(contentLength) && contentLength !== expectedSize) {
+        return reply.code(400).send({ error: `Chunk size mismatch. Expected ${expectedSize} bytes.` });
+      }
+      const body = request.body as Readable | undefined;
+      if (!body || typeof body.pipe !== "function") return reply.code(400).send({ error: "Chunk body is required" });
+
+      const finalPath = chunkTempPath(id, chunkIndex);
+      const incomingPath = `${finalPath}.${publicId()}.incoming`;
+      const startedAt = Date.now();
+      try {
+        fs.mkdirSync(uploadTempDir(id), { recursive: true });
+        const { sizeBytes, hash } = await writeChunkBody(body, incomingPath);
+        if (sizeBytes !== expectedSize) {
+          await rm(incomingPath, { force: true });
+          return reply.code(400).send({ error: `Chunk size mismatch. Expected ${expectedSize} bytes.` });
+        }
+        await rename(incomingPath, finalPath);
+        db.prepare(
+          `INSERT INTO upload_chunks (upload_id, chunk_index, size_bytes, storage_path, sha256, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(upload_id, chunk_index)
+           DO UPDATE SET size_bytes = excluded.size_bytes, storage_path = excluded.storage_path, sha256 = excluded.sha256, created_at = excluded.created_at`
+        ).run(id, chunkIndex, sizeBytes, finalPath, hash, nowIso());
+        db.prepare("UPDATE upload_sessions SET updated_at = ? WHERE id = ?").run(nowIso(), id);
+        const received = db.prepare("SELECT COUNT(*) AS count FROM upload_chunks WHERE upload_id = ?").get(id) as { count: number };
+        request.log.info({ uploadId: id, chunkIndex, sizeBytes, receivedChunks: received.count, elapsedMs: Date.now() - startedAt }, "chunk received");
+        return { ok: true, receivedChunks: received.count, chunkCount: session.chunk_count };
+      } catch (error) {
+        await rm(incomingPath, { force: true });
+        request.log.warn({ err: error, uploadId: id, chunkIndex, elapsedMs: Date.now() - startedAt }, "chunk upload failed");
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Chunk upload failed" });
+      }
+    }
+  );
+
+  app.post(
+    "/api/uploads/:id/complete",
+    { config: { rateLimit: { max: config.uploadRateLimit, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const user = requireUser(request, reply);
+      if (!user) return;
+      const { id } = request.params as { id: string };
+      const session = getUploadSession(id);
+      if (!session || session.owner_user_id !== user.id) return reply.code(404).send({ error: "Upload not found" });
+      if (session.status === "complete" && session.file_id) {
+        const file = getFile(session.file_id);
+        if (file && !file.deleted_at) return { file: toFileDto(file, config.appBaseUrl) };
+      }
+      if (session.status !== "uploading") return reply.code(409).send({ error: "Upload cannot be completed" });
+
+      const chunks = db
+        .prepare("SELECT * FROM upload_chunks WHERE upload_id = ? ORDER BY chunk_index ASC")
+        .all(id) as UploadChunkRow[];
+      if (chunks.length !== session.chunk_count) {
+        return reply.code(400).send({ error: `Upload is missing chunks (${chunks.length}/${session.chunk_count})` });
+      }
+      for (let index = 0; index < session.chunk_count; index += 1) {
+        const chunk = chunks[index];
+        if (!chunk || chunk.chunk_index !== index || chunk.size_bytes !== expectedChunkSize(session, index)) {
+          return reply.code(400).send({ error: "Upload chunks are incomplete" });
+        }
+      }
+
+      const finalTmpPath = path.join(config.tmpDir, `${publicId()}.assembled`);
+      const hash = crypto.createHash("sha256");
+      const output = fs.createWriteStream(finalTmpPath);
+      const finished = new Promise<void>((resolve, reject) => {
+        output.once("finish", () => resolve());
+        output.once("error", reject);
+      });
+      const startedAt = Date.now();
+      let assembledBytes = 0;
+      try {
+        for (const chunk of chunks) {
+          assembledBytes += await appendFileToWriteStream(chunk.storage_path, output, hash);
+        }
+        output.end();
+        await finished;
+        if (assembledBytes !== session.size_bytes) {
+          await rm(finalTmpPath, { force: true });
+          return reply.code(400).send({ error: "Assembled upload size did not match the expected size" });
+        }
+        const row = await createStoredFile(user, {
+          originalFilename: session.original_filename,
+          tmpPath: finalTmpPath,
+          sizeBytes: assembledBytes,
+          sha256: hash.digest("hex"),
+          visibility: session.visibility,
+          expiry: null,
+          passwordHash: session.password_hash,
+          expiresAt: session.expires_at
+        });
+        db.prepare("UPDATE upload_sessions SET status = 'complete', file_id = ?, updated_at = ? WHERE id = ?").run(row.id, nowIso(), id);
+        await cleanupUploadSession(id, false);
+        audit(request, "file.upload", "file", row.id, user.id, {
+          filename: row.original_filename,
+          sizeBytes: row.size_bytes,
+          uploadId: id,
+          chunkCount: session.chunk_count
+        });
+        request.log.info({ uploadId: id, fileId: row.id, sizeBytes: row.size_bytes, elapsedMs: Date.now() - startedAt }, "chunked upload completed");
+        const response: ChunkedUploadCompleteResponse = { file: toFileDto(row, config.appBaseUrl) };
+        return reply.send(response);
+      } catch (error) {
+        output.destroy();
+        await rm(finalTmpPath, { force: true });
+        request.log.warn({ err: error, uploadId: id, assembledBytes, elapsedMs: Date.now() - startedAt }, "chunked upload completion failed");
+        return reply.code(400).send(uploadErrorPayload(error));
+      }
+    }
+  );
+
+  app.delete("/api/uploads/:id", async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params as { id: string };
+    const session = getUploadSession(id);
+    if (!session || session.owner_user_id !== user.id) return reply.code(404).send({ error: "Upload not found" });
+    db.prepare("UPDATE upload_sessions SET status = 'cancelled', updated_at = ? WHERE id = ?").run(nowIso(), id);
+    await cleanupUploadSession(id, true);
+    return { ok: true };
   });
 
   app.post(
@@ -877,6 +1183,7 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     const cutoff = nowIso();
     db.prepare("DELETE FROM web_sessions WHERE expires_at <= ?").run(cutoff);
     db.prepare("DELETE FROM file_access_tokens WHERE expires_at <= ?").run(cutoff);
+    void cleanupStaleUploadSessions().catch((error) => app.log.warn({ err: error }, "stale upload cleanup failed"));
   }, 60 * 60 * 1000).unref();
 
   return app;
