@@ -1,0 +1,10 @@
+node_modules
+dist
+ui-mockup
+.data
+.env
+.env.*
+!.env.example
+npm-debug.log*
+pnpm-debug.log*
+.corepack

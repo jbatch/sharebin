@@ -1,0 +1,18 @@
+services:
+  sharebin:
+    image: ghcr.io/OWNER/REPO:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      APP_BASE_URL: "https://share.jbat.ch"
+      SESSION_SECRET: "replace-with-at-least-32-random-characters"
+      DATABASE_PATH: "/data/app.db"
+      FILES_DIR: "/data/files"
+      TMP_DIR: "/data/tmp"
+      MAX_FILE_SIZE_BYTES: "209715200"
+      DEFAULT_USER_QUOTA_BYTES: "10737418240"
+      UPLOAD_RATE_LIMIT: "60"
+      TRUST_PROXY: "true"
+    volumes:
+      - /mnt/nas/file-share:/data

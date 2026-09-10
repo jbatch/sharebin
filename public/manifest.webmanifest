@@ -1,0 +1,30 @@
+{
+  "name": "Sharebin",
+  "short_name": "Sharebin",
+  "description": "A small self-hosted file bin for shareable links.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F2EDE6",
+  "theme_color": "#F2EDE6",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [
+        {
+          "name": "files",
+          "accept": ["*/*"]
+        }
+      ]
+    }
+  }
+}
