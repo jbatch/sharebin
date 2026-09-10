@@ -57,7 +57,7 @@ try {
   if (upload.status !== 200) throw new Error(`upload failed: ${upload.status} ${await upload.text()}`);
   const uploaded = await upload.json();
   const file = uploaded.files?.[0];
-  if (!file?.id || !file.directUrl || !file.previewUrl || !file.viewUrl) throw new Error("upload response missed file links");
+  if (!file?.id || !file.directUrl || !file.downloadUrl || !file.previewUrl || !file.viewUrl) throw new Error("upload response missed file links");
   if (file.viewCount !== 0 || file.downloadCount !== 0) throw new Error("new upload should start with zero metrics");
 
   const listed = await fetchJson("/api/files", { headers: { cookie } });
@@ -100,6 +100,23 @@ try {
   if (renamedDownload.status !== 200) throw new Error(`renamed download failed: ${renamedDownload.status}`);
   if (!renamedDownload.headers.get("content-disposition")?.includes('filename="renamed-report.txt"')) {
     throw new Error("renamed download did not use updated content disposition filename");
+  }
+  const forcedDownload = await fetch(rename.file.downloadUrl);
+  if (forcedDownload.status !== 200) throw new Error(`forced download failed: ${forcedDownload.status}`);
+  if (!forcedDownload.headers.get("content-disposition")?.startsWith("attachment;")) {
+    throw new Error("forced download route did not use attachment disposition");
+  }
+  const vanityUpdate = await fetchJson(`/api/files/${file.id}`, {
+    method: "PATCH",
+    headers: { cookie },
+    body: JSON.stringify({ vanityPath: "Smoke-Link" })
+  });
+  if (vanityUpdate.file.vanityPath !== "smoke-link" || !vanityUpdate.file.vanityUrl.endsWith("/vv/smoke-link")) {
+    throw new Error("vanity link update did not normalize expected metadata");
+  }
+  const vanityPublic = await fetchJson("/api/public/vanity/smoke-link", { headers: { cookie } });
+  if (vanityPublic.status !== "available" || vanityPublic.file.id !== file.id) {
+    throw new Error("vanity public lookup did not resolve to the file");
   }
   const privateUpdate = await fetchJson(`/api/files/${file.id}`, {
     method: "PATCH",

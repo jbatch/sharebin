@@ -18,6 +18,7 @@ import {
   canOwnFile,
   fallbackMime,
   isExpired,
+  normalizeVanityPath,
   publicStatus,
   safeInlineMime,
   sanitizeFilename,
@@ -158,6 +159,18 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     );
   }
 
+  function getFileByVanity(vanityPath: string): FileRow | null {
+    return (
+      (db
+        .prepare(
+          `SELECT files.*, users.username AS owner_username
+           FROM files JOIN users ON users.id = files.owner_user_id
+           WHERE files.vanity_path = ?`
+        )
+        .get(vanityPath) as FileRow | undefined) ?? null
+    );
+  }
+
   function canManageFile(user: UserRow, file: FileRow): boolean {
     return user.role === "admin" || user.id === file.owner_user_id;
   }
@@ -168,6 +181,20 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
 
   function incrementDownloadCount(fileId: string): void {
     db.prepare("UPDATE files SET download_count = download_count + 1 WHERE id = ?").run(fileId);
+  }
+
+  function publicFileResponse(request: FastifyRequest, file: FileRow | null) {
+    const user = auth(request).user;
+    const status = publicStatus(file, user, file ? hasPasswordToken(request, file.id) : false);
+    if (!file) return { status };
+    if (!canOwnFile(user, file) && (status === "available" || status === "expired")) {
+      incrementViewCount(file.id);
+    }
+    const countedFile = getFile(file.id) ?? file;
+    return {
+      status,
+      file: status === "not_found" ? undefined : toFileDto(countedFile, config.appBaseUrl)
+    };
   }
 
   function parseExpiry(input: unknown): string | null {
@@ -353,7 +380,8 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     const count = db.prepare("SELECT COUNT(*) AS count FROM users").get() as { count: number };
     return {
       setupRequired: count.count === 0,
-      user: user ? userDto(user) : null
+      user: user ? userDto(user) : null,
+      maxFileSizeBytes: config.maxFileSizeBytes
     };
   });
 
@@ -579,7 +607,7 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     const { id } = request.params as { id: string };
     const file = getFile(id);
     if (!file || file.deleted_at || !canManageFile(user, file)) return reply.code(404).send({ error: "File not found" });
-    const body = request.body as { visibility?: FileVisibility; expiresAt?: string | null; password?: string | null; originalFilename?: string };
+    const body = request.body as { visibility?: FileVisibility; expiresAt?: string | null; password?: string | null; originalFilename?: string; vanityPath?: string | null };
     const originalFilename = body.originalFilename === undefined ? file.original_filename : body.originalFilename.trim();
     if (!originalFilename) return reply.code(400).send({ error: "Filename is required" });
     const visibility = normalizeVisibility(body.visibility ?? file.visibility, body.password ?? undefined);
@@ -587,11 +615,24 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     if (visibility === "password" && !passwordHash) {
       return reply.code(400).send({ error: "Password visibility requires a password" });
     }
-    db.prepare("UPDATE files SET original_filename = ?, safe_filename = ?, visibility = ?, password_hash = ?, expires_at = ?, updated_at = ? WHERE id = ?").run(
+    let vanityPath = file.vanity_path;
+    if (body.vanityPath !== undefined) {
+      try {
+        vanityPath = normalizeVanityPath(body.vanityPath);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid vanity link" });
+      }
+      if (vanityPath) {
+        const existing = db.prepare("SELECT id FROM files WHERE vanity_path = ? AND id != ?").get(vanityPath, id);
+        if (existing) return reply.code(409).send({ error: "Vanity link is already in use" });
+      }
+    }
+    db.prepare("UPDATE files SET original_filename = ?, safe_filename = ?, visibility = ?, password_hash = ?, vanity_path = ?, expires_at = ?, updated_at = ? WHERE id = ?").run(
       originalFilename,
       sanitizeFilename(originalFilename),
       visibility,
       visibility === "password" ? passwordHash : null,
+      vanityPath,
       body.expiresAt === undefined ? file.expires_at : parseExpiry(body.expiresAt),
       nowIso(),
       id
@@ -633,18 +674,16 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
 
   app.get("/api/public/files/:id", async (request) => {
     const { id } = request.params as { id: string };
-    const file = getFile(id);
-    const user = auth(request).user;
-    const status = publicStatus(file, user, hasPasswordToken(request, id));
-    if (!file) return { status };
-    if (!canOwnFile(user, file) && (status === "available" || status === "expired")) {
-      incrementViewCount(id);
+    return publicFileResponse(request, getFile(id));
+  });
+
+  app.get("/api/public/vanity/:vanityPath", async (request) => {
+    const { vanityPath } = request.params as { vanityPath: string };
+    try {
+      return publicFileResponse(request, getFileByVanity(normalizeVanityPath(vanityPath) ?? ""));
+    } catch {
+      return { status: "not_found" };
     }
-    const countedFile = getFile(id) ?? file;
-    return {
-      status,
-      file: status === "not_found" ? undefined : toFileDto(countedFile, config.appBaseUrl)
-    };
   });
 
   app.post(
@@ -678,7 +717,7 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     }
   );
 
-  async function serveStoredFile(request: FastifyRequest, reply: FastifyReply, countDownload: boolean) {
+  async function serveStoredFile(request: FastifyRequest, reply: FastifyReply, countDownload: boolean, forceDownload = false) {
     const { id } = request.params as { id: string; safeFilename: string };
     const file = getFile(id);
     const user = auth(request).user;
@@ -693,12 +732,16 @@ export async function buildServer({ config, db = openDatabase(config.databasePat
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Content-Type", row.mime_type);
     reply.header("Content-Length", row.size_bytes);
-    reply.header("Content-Disposition", `${inline ? "inline" : "attachment"}; filename="${row.safe_filename}"`);
+    reply.header("Content-Disposition", `${inline && !forceDownload ? "inline" : "attachment"}; filename="${row.safe_filename}"`);
     return reply.send(fs.createReadStream(row.storage_path));
   }
 
   app.get("/f/:id/:safeFilename", async (request, reply) => {
     return serveStoredFile(request, reply, true);
+  });
+
+  app.get("/d/:id/:safeFilename", async (request, reply) => {
+    return serveStoredFile(request, reply, true, true);
   });
 
   app.get("/p/:id/:safeFilename", async (request, reply) => {

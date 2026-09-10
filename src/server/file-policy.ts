@@ -33,6 +33,16 @@ export function sanitizeFilename(filename: string): string {
   return safe || "file";
 }
 
+export function normalizeVanityPath(input: unknown): string | null {
+  if (input === null || input === undefined) return null;
+  const raw = String(input).trim().replace(/^\/+/, "").replace(/^vv\//i, "");
+  if (!raw) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{2,79}$/.test(raw)) {
+    throw new Error("Vanity link must be 3-80 letters, numbers, dashes, or underscores");
+  }
+  return raw.toLowerCase();
+}
+
 export function storagePathFor(filesDir: string, fileId: string): string {
   const clean = fileId.replace(/[^A-Za-z0-9_-]/g, "");
   return path.join(filesDir, clean.slice(0, 2), clean.slice(2, 4), clean);
@@ -65,8 +75,10 @@ export function fallbackMime(filename: string): string {
 
 export function toFileDto(file: FileRow, baseUrl: string): FileDto {
   const directPath = `/f/${encodeURIComponent(file.id)}/${encodeURIComponent(file.safe_filename)}`;
+  const downloadPath = `/d/${encodeURIComponent(file.id)}/${encodeURIComponent(file.safe_filename)}`;
   const previewPath = `/p/${encodeURIComponent(file.id)}/${encodeURIComponent(file.safe_filename)}`;
   const viewPath = `/v/${encodeURIComponent(file.id)}`;
+  const vanityPath = file.vanity_path ? `/vv/${encodeURIComponent(file.vanity_path)}` : null;
   return {
     id: file.id,
     originalFilename: file.original_filename,
@@ -78,13 +90,16 @@ export function toFileDto(file: FileRow, baseUrl: string): FileDto {
     viewCount: file.view_count,
     downloadCount: file.download_count,
     visibility: file.visibility,
+    vanityPath: file.vanity_path,
     expiresAt: file.expires_at,
     createdAt: file.created_at,
     updatedAt: file.updated_at,
     ownerUsername: file.owner_username,
     directUrl: new URL(directPath, baseUrl).toString(),
+    downloadUrl: new URL(downloadPath, baseUrl).toString(),
     previewUrl: new URL(previewPath, baseUrl).toString(),
-    viewUrl: new URL(viewPath, baseUrl).toString()
+    viewUrl: new URL(viewPath, baseUrl).toString(),
+    vanityUrl: vanityPath ? new URL(vanityPath, baseUrl).toString() : null
   };
 }
 

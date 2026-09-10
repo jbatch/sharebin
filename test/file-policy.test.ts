@@ -18,6 +18,7 @@ function file(overrides: Partial<FileRow> = {}): FileRow {
     view_count: 0,
     download_count: 0,
     visibility: "public",
+    vanity_path: null,
     password_hash: null,
     expires_at: null,
     deleted_at: null,

@@ -437,6 +437,12 @@ textarea:focus {
   margin: 0 0 12px;
 }
 
+.upload-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
 .upload-list,
 .file-list {
   display: flex;
@@ -542,6 +548,11 @@ textarea:focus {
   color: var(--sky);
   cursor: pointer;
   font-weight: 500;
+}
+
+.upload-error {
+  margin-top: 10px;
+  justify-content: flex-start;
 }
 
 .link-results {
@@ -650,21 +661,6 @@ textarea:focus {
   flex: 1;
 }
 
-.rename-form {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-}
-
-.rename-form input {
-  min-width: 0;
-  height: 30px;
-  margin: 0;
-  padding: 6px 8px;
-  font-size: 13px;
-}
-
 .settings-controls,
 .password-edit {
   display: flex;
@@ -735,22 +731,27 @@ textarea:focus {
   color: rgba(49, 49, 49, 0.72);
 }
 
-.file-actions,
 .confirm-delete {
   display: flex;
   align-items: center;
   gap: 4px;
 }
 
-.file-actions {
-  min-width: 0;
-}
-
 .file-action-buttons {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex: 0 0 auto;
+}
+
+.link-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid rgba(49, 49, 49, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
 }
 
 .confirm-delete button {
@@ -843,6 +844,10 @@ textarea:focus {
   padding: 24px;
 }
 
+.public-card:has(.text-preview) {
+  max-width: 760px;
+}
+
 .public-card.centered {
   text-align: center;
 }
@@ -868,6 +873,98 @@ textarea:focus {
   color: rgba(49, 49, 49, 0.5);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
+}
+
+.text-preview {
+  margin-bottom: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(49, 49, 49, 0.12);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.text-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 38px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid rgba(49, 49, 49, 0.1);
+  background: var(--dune);
+  color: rgba(49, 49, 49, 0.62);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.text-preview-body,
+.markdown-preview {
+  max-height: 58vh;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+}
+
+.text-preview-body,
+.markdown-preview pre {
+  color: var(--charcoal);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.markdown-preview {
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.markdown-preview h2,
+.markdown-preview h3,
+.markdown-preview h4,
+.markdown-preview p,
+.markdown-preview ul,
+.markdown-preview blockquote,
+.markdown-preview pre {
+  margin: 0 0 10px;
+}
+
+.markdown-preview h2,
+.markdown-preview h3,
+.markdown-preview h4 {
+  color: var(--charcoal);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.markdown-preview h3 {
+  font-size: 14.5px;
+}
+
+.markdown-preview h4 {
+  font-size: 13.5px;
+}
+
+.markdown-preview p,
+.markdown-preview li {
+  color: rgba(49, 49, 49, 0.78);
+}
+
+.markdown-preview ul {
+  padding-left: 20px;
+}
+
+.markdown-preview blockquote {
+  padding-left: 10px;
+  border-left: 3px solid var(--sky);
+  color: rgba(49, 49, 49, 0.62);
+}
+
+.markdown-preview pre {
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--shell);
 }
 
 .audio-preview {
@@ -903,6 +1000,30 @@ textarea:focus {
   border-top: 1px solid rgba(49, 49, 49, 0.1);
 }
 
+.owner-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.owner-settings-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.owner-settings-form label {
+  margin: 0;
+}
+
+.owner-settings-form input {
+  height: 34px;
+  margin-top: 5px;
+  padding: 7px 9px;
+  font-size: 13px;
+}
+
 .public-settings .settings-controls {
   justify-content: center;
 }
@@ -916,6 +1037,23 @@ textarea:focus {
   margin-bottom: 8px;
   color: var(--red);
   font-size: 12.5px;
+}
+
+.text-danger-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  border: 0;
+  background: transparent;
+  color: var(--red);
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.owner-delete {
+  justify-content: flex-start;
 }
 
 @keyframes toastIn {
@@ -969,15 +1107,6 @@ textarea:focus {
     line-height: 1.35;
   }
 
-  .file-actions {
-    display: flex;
-    flex-wrap: wrap;
-    width: 100%;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-  }
-
   .file-action-buttons {
     justify-content: flex-end;
     margin-left: auto;
@@ -994,7 +1123,6 @@ textarea:focus {
     max-width: none;
   }
 
-  .file-actions,
   .confirm-delete {
     justify-content: flex-end;
   }
@@ -1002,6 +1130,18 @@ textarea:focus {
   .confirm-delete {
     width: 100%;
     align-self: start;
+  }
+
+  .public-shell {
+    padding: 18px 14px calc(32px + env(safe-area-inset-bottom));
+  }
+
+  .public-card {
+    padding: 18px;
+  }
+
+  .owner-settings-form {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

@@ -9,7 +9,6 @@ import {
   FileText,
   Lock,
   LogOut,
-  Pencil,
   Search,
   Shield,
   Trash2,
@@ -37,7 +36,11 @@ type FileSettingsPatch = {
   visibility?: FileVisibility;
   expiresAt?: string | null;
   password?: string;
+  vanityPath?: string | null;
 };
+type PublicLookup = { kind: "id" | "vanity"; value: string };
+
+const fallbackMaxFileSizeBytes = 200 * 1024 * 1024;
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = init.body instanceof FormData ? init.headers : init.body ? { "Content-Type": "application/json", ...init.headers } : init.headers;
@@ -103,6 +106,30 @@ function fileKind(file: FileDto): string {
   if (file.mimeType.includes("zip") || file.mimeType.includes("tar") || file.mimeType.includes("gzip")) return "ZIP";
   if (file.mimeType.startsWith("text/")) return "TXT";
   return file.safeFilename.split(".").pop()?.slice(0, 4).toUpperCase() || "FILE";
+}
+
+function fileExtension(file: FileDto): string {
+  const filename = file.originalFilename || file.safeFilename;
+  const dot = filename.lastIndexOf(".");
+  return dot >= 0 ? filename.slice(dot).toLowerCase() : "";
+}
+
+function textDisplayKind(file: FileDto): "json" | "markdown" | "text" | null {
+  const ext = fileExtension(file);
+  if (ext === ".json" || file.mimeType.includes("json")) return "json";
+  if (ext === ".md" || ext === ".markdown") return "markdown";
+  if (file.mimeType.startsWith("text/")) return "text";
+  if ([".csv", ".log", ".yaml", ".yml", ".xml", ".html", ".css", ".js", ".jsx", ".ts", ".tsx"].includes(ext)) return "text";
+  return null;
+}
+
+function prettyText(kind: "json" | "markdown" | "text", text: string): string {
+  if (kind !== "json") return text;
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
 }
 
 function AppMark({ small = false }: { small?: boolean }) {
@@ -232,7 +259,7 @@ function AuthCard({
   );
 }
 
-function UploadScreen({ onUploaded }: { onUploaded: () => void }) {
+function UploadScreen({ maxFileSizeBytes, onUploaded }: { maxFileSizeBytes: number; onUploaded: () => void }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const mediaInputRef = useRef<HTMLInputElement | null>(null);
   const [mode, setMode] = useState<UploadMode>("file");
@@ -245,21 +272,35 @@ function UploadScreen({ onUploaded }: { onUploaded: () => void }) {
   const [pasteLoading, setPasteLoading] = useState(false);
   const [pasteResult, setPasteResult] = useState<FileDto | null>(null);
   const [items, setItems] = useState<UploadItem[]>([]);
+  const [uploadError, setUploadError] = useState("");
   const [dragging, setDragging] = useState(false);
   const [toast, setToast] = useState("");
 
   const addFiles = useCallback(
     (files: FileList | File[]) => {
-      const incoming = Array.from(files).map((file) => ({
+      const selected = Array.from(files);
+      const accepted = selected.filter((file) => file.size <= maxFileSizeBytes);
+      const rejected = selected.filter((file) => file.size > maxFileSizeBytes);
+      if (rejected.length) {
+        const names = rejected
+          .slice(0, 3)
+          .map((file) => file.name)
+          .join(", ");
+        const extra = rejected.length > 3 ? ` and ${rejected.length - 3} more` : "";
+        setUploadError(`${rejected.length === 1 ? "File is" : "Files are"} too large. Max size is ${formatBytes(maxFileSizeBytes)}: ${names}${extra}`);
+      } else {
+        setUploadError("");
+      }
+      if (!accepted.length) return;
+      const incoming = accepted.map((file) => ({
         id: crypto.randomUUID(),
         file,
         progress: 0,
         status: "queued" as const
       }));
       setItems((current) => [...incoming, ...current]);
-      incoming.forEach((item) => uploadOne(item, visibility, expiry, password, setItems, onUploaded));
     },
-    [expiry, onUploaded, password, visibility]
+    [maxFileSizeBytes]
   );
 
   useEffect(() => {
@@ -279,6 +320,11 @@ function UploadScreen({ onUploaded }: { onUploaded: () => void }) {
 
   async function submitPaste(event: React.FormEvent) {
     event.preventDefault();
+    const pasteSizeBytes = new Blob([pasteText]).size;
+    if (pasteSizeBytes > maxFileSizeBytes) {
+      setPasteError(`Text file is too large. Max size is ${formatBytes(maxFileSizeBytes)}.`);
+      return;
+    }
     setPasteLoading(true);
     setPasteError("");
     setPasteResult(null);
@@ -309,6 +355,16 @@ function UploadScreen({ onUploaded }: { onUploaded: () => void }) {
     }
     inputRef.current?.click();
   }
+
+  function startUploads() {
+    items
+      .filter((item) => item.status === "queued" || item.status === "error")
+      .forEach((item) => uploadOne(item, visibility, expiry, password, setItems, onUploaded));
+  }
+
+  const uploadableCount = items.filter((item) => item.status === "queued" || item.status === "error").length;
+  const uploadingCount = items.filter((item) => item.status === "uploading").length;
+  const uploadButtonLabel = uploadingCount ? "Uploading..." : uploadableCount ? `Upload ${uploadableCount} ${uploadableCount === 1 ? "file" : "files"}` : "Uploaded";
 
   return (
     <section>
@@ -367,38 +423,53 @@ function UploadScreen({ onUploaded }: { onUploaded: () => void }) {
         }}
       />
       {mode === "file" ? (
-        <div
-          className={`dropzone ${dragging ? "dragging" : ""}`}
-          onClick={openPrimaryPicker}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(event) => {
-            event.preventDefault();
-            setDragging(false);
-            addFiles(event.dataTransfer.files);
-          }}
-          role="button"
-          tabIndex={0}
-        >
-          <Upload size={30} />
-          <strong>Drop files here or click to choose</strong>
-          <span>You can also paste from your clipboard</span>
-          <div className="picker-actions">
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                inputRef.current?.click();
-              }}
-            >
-              <FileIcon size={15} />
-              Files
-            </button>
+        <>
+          <div
+            className={`dropzone ${dragging ? "dragging" : ""}`}
+            onClick={openPrimaryPicker}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDragging(false);
+              addFiles(event.dataTransfer.files);
+            }}
+            role="button"
+            tabIndex={0}
+          >
+            <Upload size={30} />
+            <strong>Drop files here or click to choose</strong>
+            <span>You can also paste from your clipboard · max {formatBytes(maxFileSizeBytes)} each</span>
+            <div className="picker-actions">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  inputRef.current?.click();
+                }}
+              >
+                <FileIcon size={15} />
+                Files
+              </button>
+            </div>
           </div>
-        </div>
+          {uploadError && (
+            <div className="row-error upload-error">
+              <span>{uploadError}</span>
+            </div>
+          )}
+          {items.length > 0 && (
+            <div className="upload-actions">
+              <button className="button primary compact" type="button" onClick={startUploads} disabled={!uploadableCount || uploadingCount > 0}>
+                <Upload size={15} />
+                {uploadButtonLabel}
+              </button>
+            </div>
+          )}
+        </>
       ) : (
         <form className="paste-card" onSubmit={submitPaste}>
           <label>
@@ -527,8 +598,6 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
   const [linkState, setLinkState] = useState<"active" | "expired">("active");
   const [visibility, setVisibility] = useState<FileVisibility | "all">("all");
   const [sort, setSort] = useState("newest");
-  const [deleteId, setDeleteId] = useState("");
-  const [rename, setRename] = useState<{ id: string; name: string } | null>(null);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ q, type, visibility, sort, archived: linkState === "expired" ? "true" : "false" });
@@ -541,34 +610,7 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
     load().catch(() => undefined);
   }, [load, reloadSignal]);
 
-  async function remove(file: FileDto) {
-    await api(`/api/files/${file.id}`, { method: "DELETE" });
-    setDeleteId("");
-    await load();
-  }
-
-  async function updateFilename(file: FileDto) {
-    const nextName = rename?.name.trim();
-    if (!nextName) return;
-    await updateFile(file, { originalFilename: nextName });
-    setRename(null);
-  }
-
   const storagePct = Math.min(100, Math.round((storage.usedBytes / storage.quotaBytes) * 100));
-
-  function keepInCurrentFilter(file: FileDto): boolean {
-    if ((expiryControlValue(file.expiresAt) === "archived") !== (linkState === "expired")) return false;
-    return visibility === "all" || file.visibility === visibility;
-  }
-
-  async function updateFile(file: FileDto, patch: FileSettingsPatch) {
-    const data = await api<{ file: FileDto }>(`/api/files/${file.id}`, {
-      method: "PATCH",
-      body: JSON.stringify(patch)
-    });
-    setFiles((current) => current.map((item) => (item.id === file.id ? data.file : item)).filter(keepInCurrentFilter));
-    return data.file;
-  }
 
   return (
     <section className="files-view">
@@ -621,25 +663,7 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
             <div className="file-info">
               <div className="file-chip">{fileKind(file)}</div>
               <div className="file-main">
-                {rename?.id === file.id ? (
-                  <form
-                    className="rename-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      updateFilename(file).catch(() => undefined);
-                    }}
-                  >
-                    <input value={rename.name} onChange={(event) => setRename({ id: file.id, name: event.target.value })} aria-label={`Filename for ${file.originalFilename}`} autoFocus />
-                    <button className="icon-button blue" type="submit" title="Save filename">
-                      <Check size={15} />
-                    </button>
-                    <button className="icon-button" type="button" onClick={() => setRename(null)} title="Cancel rename">
-                      <X size={15} />
-                    </button>
-                  </form>
-                ) : (
-                  <strong>{file.originalFilename}</strong>
-                )}
+                <strong>{file.originalFilename}</strong>
                 <span>
                   {formatBytes(file.sizeBytes)} · {formatDate(file.createdAt)} · {plural(file.viewCount, "view")} · {plural(file.downloadCount, "download")}
                 </span>
@@ -649,30 +673,24 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
                 </div>
               </div>
             </div>
-            {deleteId === file.id ? (
-              <div className="confirm-delete">
-                <button onClick={() => remove(file)}>Delete</button>
-                <button onClick={() => setDeleteId("")}>Keep</button>
+            <div className="file-action-buttons">
+              <div className="link-action-group" aria-label="View link actions">
+                <a className="icon-button" href={`/v/${encodeURIComponent(file.id)}`} title="View">
+                  <Eye size={15} />
+                </a>
+                <button className="icon-button blue" onClick={() => navigator.clipboard.writeText(file.viewUrl)} title="Copy view link">
+                  <Copy size={15} />
+                </button>
               </div>
-            ) : (
-              <div className="file-actions">
-                <FileSettingsControls file={file} onUpdate={(patch) => updateFile(file, patch)} />
-                <div className="file-action-buttons">
-                  <button className="icon-button" onClick={() => setRename({ id: file.id, name: file.originalFilename })} title="Rename">
-                    <Pencil size={15} />
-                  </button>
-                  <a className="icon-button" href={`/v/${encodeURIComponent(file.id)}`} title="View">
-                    <Eye size={15} />
-                  </a>
-                  <button className="icon-button blue" onClick={() => navigator.clipboard.writeText(file.viewUrl)} title="Copy view link">
-                    <Copy size={15} />
-                  </button>
-                  <button className="icon-button red" onClick={() => setDeleteId(file.id)} title="Delete">
-                    <Trash2 size={15} />
-                  </button>
-                </div>
+              <div className="link-action-group" aria-label="Download link actions">
+                <button className="icon-button blue" onClick={() => navigator.clipboard.writeText(file.downloadUrl)} title="Copy download link">
+                  <Copy size={15} />
+                </button>
+                <a className="icon-button" href={file.downloadUrl} title="Download now">
+                  <Download size={15} />
+                </a>
               </div>
-            )}
+            </div>
           </article>
         ))}
         {files.length === 0 && <div className="empty-state">No {linkState === "expired" ? "expired" : "active"} files match these filters.</div>}
@@ -774,6 +792,93 @@ function FileSettingsControls({ file, onUpdate }: { file: FileDto; onUpdate: (pa
   );
 }
 
+function OwnerFileSettings({
+  file,
+  onUpdate,
+  onCopy,
+  onDelete
+}: {
+  file: FileDto;
+  onUpdate: (patch: FileSettingsPatch) => Promise<FileDto>;
+  onCopy: (text: string) => void;
+  onDelete: () => Promise<void>;
+}) {
+  const [filename, setFilename] = useState(file.originalFilename);
+  const [vanityPath, setVanityPath] = useState(file.vanityPath ?? "");
+  const [saving, setSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setFilename(file.originalFilename);
+    setVanityPath(file.vanityPath ?? "");
+  }, [file.id, file.originalFilename, file.vanityPath]);
+
+  async function saveDetails(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await onUpdate({
+        originalFilename: filename,
+        vanityPath: vanityPath.trim() || null
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteFile() {
+    setSaving(true);
+    setError("");
+    try {
+      await onDelete();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="owner-settings">
+      <form className="owner-settings-form" onSubmit={saveDetails}>
+        <label>
+          Filename
+          <input value={filename} onChange={(event) => setFilename(event.target.value)} />
+        </label>
+        <label>
+          Vanity link
+          <input value={vanityPath} onChange={(event) => setVanityPath(event.target.value)} placeholder="release-notes" />
+        </label>
+        <button className="button primary compact" type="submit" disabled={saving}>
+          <Check size={15} />
+          Save details
+        </button>
+      </form>
+      {file.vanityUrl && <LinkRow label="Vanity" value={file.vanityUrl} onCopy={() => onCopy(file.vanityUrl!)} />}
+      <FileSettingsControls file={file} onUpdate={onUpdate} />
+      {error && <div className="inline-error">{error}</div>}
+      {confirmingDelete ? (
+        <div className="confirm-delete owner-delete">
+          <button type="button" onClick={deleteFile} disabled={saving}>
+            Delete file
+          </button>
+          <button type="button" onClick={() => setConfirmingDelete(false)} disabled={saving}>
+            Keep
+          </button>
+        </div>
+      ) : (
+        <button className="text-danger-button" type="button" onClick={() => setConfirmingDelete(true)}>
+          <Trash2 size={15} />
+          Delete file
+        </button>
+      )}
+    </div>
+  );
+}
+
 function AdminScreen() {
   const [invites, setInvites] = useState<InviteDto[]>([]);
   const [latestUrl, setLatestUrl] = useState("");
@@ -829,25 +934,31 @@ function AdminScreen() {
   );
 }
 
-function PublicView({ fileId }: { fileId: string }) {
+function PublicView({ lookup }: { lookup: PublicLookup }) {
   const [data, setData] = useState<PublicFileResponse | null>(null);
   const [canManage, setCanManage] = useState(false);
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+
+  const publicApiPath =
+    lookup.kind === "vanity"
+      ? `/api/public/vanity/${encodeURIComponent(lookup.value)}`
+      : `/api/public/files/${encodeURIComponent(lookup.value)}`;
 
   const load = useCallback(async () => {
-    const publicData = await api<PublicFileResponse>(`/api/public/files/${encodeURIComponent(fileId)}`);
+    const publicData = await api<PublicFileResponse>(publicApiPath);
     setData(publicData);
     setCanManage(false);
     if (!publicData.file) return;
     try {
-      const managedData = await api<{ file: FileDto }>(`/api/files/${encodeURIComponent(fileId)}`);
+      const managedData = await api<{ file: FileDto }>(`/api/files/${encodeURIComponent(publicData.file.id)}`);
       setData((current) => (current ? { ...current, status: "available", file: managedData.file } : current));
       setCanManage(true);
     } catch {
       setCanManage(false);
     }
-  }, [fileId]);
+  }, [publicApiPath]);
 
   useEffect(() => {
     load().catch(() => setData({ status: "not_found" }));
@@ -856,8 +967,9 @@ function PublicView({ fileId }: { fileId: string }) {
   async function unlock(event: React.FormEvent) {
     event.preventDefault();
     setError("");
+    if (!data?.file) return;
     try {
-      await api(`/api/public/files/${encodeURIComponent(fileId)}/unlock`, { method: "POST", body: JSON.stringify({ password }) });
+      await api(`/api/public/files/${encodeURIComponent(data.file.id)}/unlock`, { method: "POST", body: JSON.stringify({ password }) });
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Incorrect password");
@@ -865,7 +977,8 @@ function PublicView({ fileId }: { fileId: string }) {
   }
 
   async function updatePublicFile(patch: FileSettingsPatch) {
-    const data = await api<{ file: FileDto }>(`/api/files/${encodeURIComponent(fileId)}`, {
+    if (!file) throw new Error("File is not loaded");
+    const data = await api<{ file: FileDto }>(`/api/files/${encodeURIComponent(file.id)}`, {
       method: "PATCH",
       body: JSON.stringify(patch)
     });
@@ -873,8 +986,20 @@ function PublicView({ fileId }: { fileId: string }) {
     return data.file;
   }
 
+  async function copy(text: string) {
+    await navigator.clipboard.writeText(text);
+    setToast("Copied");
+    window.setTimeout(() => setToast(""), 1600);
+  }
+
   const status = data?.status ?? "available";
   const file = data?.file;
+
+  async function deletePublicFile() {
+    if (!file) return;
+    await api(`/api/files/${encodeURIComponent(file.id)}`, { method: "DELETE" });
+    window.location.href = "/";
+  }
 
   return (
     <main className="public-page">
@@ -883,12 +1008,12 @@ function PublicView({ fileId }: { fileId: string }) {
           <span>Back</span>
         </a>
         <span>·</span>
-        <span>Recipient view at share.jbat.ch/v/{fileId}</span>
+        <span>Recipient view at {lookup.kind === "vanity" ? `/vv/${lookup.value}` : `/v/${lookup.value}`}</span>
       </div>
       <div className="public-shell">
         {status === "available" && file && (
           <div className="public-card">
-            <Preview file={file} />
+            <Preview file={file} onCopyText={copy} />
             <h1>{file.originalFilename}</h1>
             <p>
               {formatBytes(file.sizeBytes)} · uploaded {formatDate(file.createdAt)}
@@ -896,10 +1021,10 @@ function PublicView({ fileId }: { fileId: string }) {
             <Badge expiresAt={file.expiresAt} />
             {canManage && (
               <div className="public-settings">
-                <FileSettingsControls file={file} onUpdate={updatePublicFile} />
+                <OwnerFileSettings file={file} onUpdate={updatePublicFile} onCopy={copy} onDelete={deletePublicFile} />
               </div>
             )}
-            <a className="button sky" href={file.directUrl}>
+            <a className="button sky" href={file.downloadUrl}>
               <Download size={15} />
               Download
             </a>
@@ -942,11 +1067,14 @@ function PublicView({ fileId }: { fileId: string }) {
           </div>
         )}
       </div>
+      {toast && <div className="toast">{toast}</div>}
     </main>
   );
 }
 
-function Preview({ file }: { file: FileDto }) {
+function Preview({ file, onCopyText }: { file: FileDto; onCopyText: (text: string) => void }) {
+  const textKind = textDisplayKind(file);
+  if (textKind) return <TextPreview file={file} kind={textKind} onCopy={onCopyText} />;
   if (file.mimeType.startsWith("image/") && file.mimeType !== "image/svg+xml") {
     return <img className="preview" src={file.previewUrl} alt="" />;
   }
@@ -956,7 +1084,127 @@ function Preview({ file }: { file: FileDto }) {
   return <div className="preview unavailable">preview unavailable for .{file.safeFilename.split(".").pop() ?? "file"}</div>;
 }
 
-function AppShell({ user, onLogout }: { user: UserDto; onLogout: () => void }) {
+function TextPreview({ file, kind, onCopy }: { file: FileDto; kind: "json" | "markdown" | "text"; onCopy: (text: string) => void }) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState("");
+  const displayText = prettyText(kind, text);
+
+  useEffect(() => {
+    let cancelled = false;
+    setText("");
+    setError("");
+    fetch(file.previewUrl, { credentials: "include" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Preview failed: ${response.status}`);
+        return response.text();
+      })
+      .then((body) => {
+        if (!cancelled) setText(body);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Preview unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file.previewUrl]);
+
+  return (
+    <div className={`text-preview ${kind}`}>
+      <div className="text-preview-head">
+        <span>{kind === "json" ? "JSON" : kind === "markdown" ? "Markdown" : "Text"}</span>
+        {text && (
+          <button className="icon-button blue" type="button" onClick={() => onCopy(displayText)} title="Copy text">
+            <Copy size={15} />
+          </button>
+        )}
+      </div>
+      {error ? (
+        <div className="preview unavailable">{error}</div>
+      ) : !text ? (
+        <div className="preview unavailable">Loading preview</div>
+      ) : kind === "markdown" ? (
+        <div className="markdown-preview">{renderMarkdown(displayText)}</div>
+      ) : (
+        <pre className="text-preview-body">{displayText}</pre>
+      )}
+    </div>
+  );
+}
+
+function renderMarkdown(markdown: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const lines = markdown.split(/\r?\n/);
+  let codeLines: string[] | null = null;
+  let listItems: string[] = [];
+
+  function flushList() {
+    if (!listItems.length) return;
+    const items = listItems;
+    listItems = [];
+    nodes.push(
+      <ul key={`ul-${nodes.length}`}>
+        {items.map((item, index) => (
+          <li key={index}>{item}</li>
+        ))}
+      </ul>
+    );
+  }
+
+  lines.forEach((line, index) => {
+    if (line.startsWith("```")) {
+      if (codeLines) {
+        nodes.push(
+          <pre key={`code-${index}`}>
+            <code>{codeLines.join("\n")}</code>
+          </pre>
+        );
+        codeLines = null;
+      } else {
+        flushList();
+        codeLines = [];
+      }
+      return;
+    }
+    if (codeLines) {
+      codeLines.push(line);
+      return;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushList();
+      const level = heading[1].length;
+      const Tag = `h${level + 1}` as "h2" | "h3" | "h4";
+      nodes.push(<Tag key={`h-${index}`}>{heading[2]}</Tag>);
+      return;
+    }
+    const list = line.match(/^\s*[-*]\s+(.+)$/);
+    if (list) {
+      listItems.push(list[1]);
+      return;
+    }
+    flushList();
+    if (!line.trim()) {
+      nodes.push(<br key={`br-${index}`} />);
+    } else if (line.startsWith(">")) {
+      nodes.push(<blockquote key={`q-${index}`}>{line.replace(/^>\s?/, "")}</blockquote>);
+    } else {
+      nodes.push(<p key={`p-${index}`}>{line}</p>);
+    }
+  });
+  flushList();
+  if (codeLines) {
+    const remainingCodeLines = codeLines as string[];
+    nodes.push(
+      <pre key="code-final">
+        <code>{remainingCodeLines.join("\n")}</code>
+      </pre>
+    );
+  }
+  return nodes;
+}
+
+function AppShell({ user, maxFileSizeBytes, onLogout }: { user: UserDto; maxFileSizeBytes: number; onLogout: () => void }) {
   const [tab, setTab] = useState<TabName>("upload");
   const [menu, setMenu] = useState(false);
   const [reloadSignal, setReloadSignal] = useState(0);
@@ -987,7 +1235,7 @@ function AppShell({ user, onLogout }: { user: UserDto; onLogout: () => void }) {
         </div>
       </header>
       <main className="app-body">
-        {tab === "upload" && <UploadScreen onUploaded={() => setReloadSignal((current) => current + 1)} />}
+        {tab === "upload" && <UploadScreen maxFileSizeBytes={maxFileSizeBytes} onUploaded={() => setReloadSignal((current) => current + 1)} />}
         {tab === "files" && <FilesScreen reloadSignal={reloadSignal} />}
         {tab === "admin" && <AdminScreen />}
       </main>
@@ -1017,18 +1265,18 @@ export default function App() {
     const match = window.location.pathname.match(/^\/invite\/([^/]+)/);
     return match ? decodeURIComponent(match[1]) : null;
   }, []);
-  const publicMatch = window.location.pathname.match(/^\/v\/([^/]+)/);
+  const publicMatch = window.location.pathname.match(/^\/(v|vv)\/([^/]+)/);
 
   useEffect(() => {
     api<MeResponse>("/api/me")
       .then(setMe)
-      .catch(() => setMe({ setupRequired: false, user: null }));
+      .catch(() => setMe({ setupRequired: false, user: null, maxFileSizeBytes: fallbackMaxFileSizeBytes }));
   }, []);
 
-  if (publicMatch) return <PublicView fileId={decodeURIComponent(publicMatch[1])} />;
+  if (publicMatch) return <PublicView lookup={{ kind: publicMatch[1] === "vv" ? "vanity" : "id", value: decodeURIComponent(publicMatch[2]) }} />;
   if (!me) return <main className="center-page">Loading</main>;
   if (me.setupRequired || !me.user || inviteCode) {
-    return <AuthCard setup={me.setupRequired} inviteCode={inviteCode} onDone={(user) => setMe({ setupRequired: false, user })} />;
+    return <AuthCard setup={me.setupRequired} inviteCode={inviteCode} onDone={(user) => setMe({ setupRequired: false, user, maxFileSizeBytes: me.maxFileSizeBytes })} />;
   }
-  return <AppShell user={me.user} onLogout={() => setMe({ setupRequired: false, user: null })} />;
+  return <AppShell user={me.user} maxFileSizeBytes={me.maxFileSizeBytes} onLogout={() => setMe({ setupRequired: false, user: null, maxFileSizeBytes: me.maxFileSizeBytes })} />;
 }

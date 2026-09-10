@@ -26,13 +26,16 @@ export type FileDto = {
   viewCount: number;
   downloadCount: number;
   visibility: FileVisibility;
+  vanityPath: string | null;
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
   ownerUsername?: string;
   directUrl: string;
+  downloadUrl: string;
   previewUrl: string;
   viewUrl: string;
+  vanityUrl: string | null;
 };
 
 export type InviteDto = {
@@ -47,6 +50,7 @@ export type InviteDto = {
 export type MeResponse = {
   setupRequired: boolean;
   user: UserDto | null;
+  maxFileSizeBytes: number;
 };
 
 export type PublicFileResponse = {

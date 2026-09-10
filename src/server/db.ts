@@ -40,6 +40,7 @@ export type FileRow = {
   view_count: number;
   download_count: number;
   visibility: FileVisibility;
+  vanity_path: string | null;
   password_hash: string | null;
   expires_at: string | null;
   deleted_at: string | null;
@@ -102,6 +103,7 @@ export function migrate(db: Db): void {
       view_count INTEGER NOT NULL DEFAULT 0,
       download_count INTEGER NOT NULL DEFAULT 0,
       visibility TEXT NOT NULL CHECK(visibility IN ('public', 'private', 'password')),
+      vanity_path TEXT UNIQUE,
       password_hash TEXT,
       expires_at TEXT,
       deleted_at TEXT,
@@ -143,6 +145,8 @@ export function migrate(db: Db): void {
   `);
   ensureColumn(db, "files", "view_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "files", "download_count", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "files", "vanity_path", "TEXT");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS files_vanity_path_idx ON files(vanity_path) WHERE vanity_path IS NOT NULL");
 }
 
 function ensureColumn(db: Db, table: string, column: string, definition: string): void {
