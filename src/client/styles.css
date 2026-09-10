@@ -623,6 +623,14 @@ textarea:focus {
   padding: 12px 14px;
 }
 
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
 .file-chip {
   display: flex;
   align-items: center;
@@ -732,6 +740,17 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.file-actions {
+  min-width: 0;
+}
+
+.file-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
 }
 
 .confirm-delete button {
@@ -912,11 +931,12 @@ textarea:focus {
 
 @media (max-width: 640px) {
   .app-body {
-    padding: 18px 14px 92px;
+    padding: 18px 14px calc(112px + env(safe-area-inset-bottom));
   }
 
   .tabs {
     gap: 48px;
+    padding-bottom: env(safe-area-inset-bottom);
   }
 
   .filter-row {
@@ -925,14 +945,94 @@ textarea:focus {
   }
 
   .file-row {
+    flex-direction: column;
     align-items: flex-start;
+    justify-content: stretch;
+    min-height: 0;
+  }
+
+  .file-info {
+    width: 100%;
+  }
+
+  .file-main strong {
+    display: -webkit-box;
+    overflow: hidden;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .file-main span {
+    display: block;
+    line-height: 1.35;
+  }
+
+  .file-actions {
+    display: flex;
+    flex-wrap: wrap;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .file-action-buttons {
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+
+  .settings-controls {
+    gap: 6px;
+    flex: 1 1 auto;
+  }
+
+  .settings-controls select,
+  select.expiry-select {
+    min-width: 0;
+    max-width: none;
   }
 
   .file-actions,
   .confirm-delete {
-    flex-wrap: wrap;
     justify-content: flex-end;
-    align-self: center;
+  }
+
+  .confirm-delete {
+    width: 100%;
+    align-self: start;
+  }
+}
+
+@media (max-width: 430px) {
+  .file-action-buttons {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .settings-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .settings-controls .icon-button {
+    justify-self: start;
+  }
+
+  .settings-error {
+    grid-column: 1 / -1;
+  }
+
+  .password-edit {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .password-edit input {
+    flex: 1;
+    width: auto;
   }
 }
 

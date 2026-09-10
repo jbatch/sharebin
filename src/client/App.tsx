@@ -618,33 +618,35 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
       <div className="file-list">
         {files.map((file) => (
           <article className="file-row" key={file.id}>
-            <div className="file-chip">{fileKind(file)}</div>
-            <div className="file-main">
-              {rename?.id === file.id ? (
-                <form
-                  className="rename-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    updateFilename(file).catch(() => undefined);
-                  }}
-                >
-                  <input value={rename.name} onChange={(event) => setRename({ id: file.id, name: event.target.value })} aria-label={`Filename for ${file.originalFilename}`} autoFocus />
-                  <button className="icon-button blue" type="submit" title="Save filename">
-                    <Check size={15} />
-                  </button>
-                  <button className="icon-button" type="button" onClick={() => setRename(null)} title="Cancel rename">
-                    <X size={15} />
-                  </button>
-                </form>
-              ) : (
-                <strong>{file.originalFilename}</strong>
-              )}
-              <span>
-                {formatBytes(file.sizeBytes)} · {formatDate(file.createdAt)} · {plural(file.viewCount, "view")} · {plural(file.downloadCount, "download")}
-              </span>
-              <div className="badge-row">
-                <Badge visibility={file.visibility} />
-                <Badge expiresAt={file.expiresAt} />
+            <div className="file-info">
+              <div className="file-chip">{fileKind(file)}</div>
+              <div className="file-main">
+                {rename?.id === file.id ? (
+                  <form
+                    className="rename-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      updateFilename(file).catch(() => undefined);
+                    }}
+                  >
+                    <input value={rename.name} onChange={(event) => setRename({ id: file.id, name: event.target.value })} aria-label={`Filename for ${file.originalFilename}`} autoFocus />
+                    <button className="icon-button blue" type="submit" title="Save filename">
+                      <Check size={15} />
+                    </button>
+                    <button className="icon-button" type="button" onClick={() => setRename(null)} title="Cancel rename">
+                      <X size={15} />
+                    </button>
+                  </form>
+                ) : (
+                  <strong>{file.originalFilename}</strong>
+                )}
+                <span>
+                  {formatBytes(file.sizeBytes)} · {formatDate(file.createdAt)} · {plural(file.viewCount, "view")} · {plural(file.downloadCount, "download")}
+                </span>
+                <div className="badge-row">
+                  <Badge visibility={file.visibility} />
+                  <Badge expiresAt={file.expiresAt} />
+                </div>
               </div>
             </div>
             {deleteId === file.id ? (
@@ -655,18 +657,20 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
             ) : (
               <div className="file-actions">
                 <FileSettingsControls file={file} onUpdate={(patch) => updateFile(file, patch)} />
-                <button className="icon-button" onClick={() => setRename({ id: file.id, name: file.originalFilename })} title="Rename">
-                  <Pencil size={15} />
-                </button>
-                <a className="icon-button" href={`/v/${encodeURIComponent(file.id)}`} title="View">
-                  <Eye size={15} />
-                </a>
-                <button className="icon-button blue" onClick={() => navigator.clipboard.writeText(file.viewUrl)} title="Copy view link">
-                  <Copy size={15} />
-                </button>
-                <button className="icon-button red" onClick={() => setDeleteId(file.id)} title="Delete">
-                  <Trash2 size={15} />
-                </button>
+                <div className="file-action-buttons">
+                  <button className="icon-button" onClick={() => setRename({ id: file.id, name: file.originalFilename })} title="Rename">
+                    <Pencil size={15} />
+                  </button>
+                  <a className="icon-button" href={`/v/${encodeURIComponent(file.id)}`} title="View">
+                    <Eye size={15} />
+                  </a>
+                  <button className="icon-button blue" onClick={() => navigator.clipboard.writeText(file.viewUrl)} title="Copy view link">
+                    <Copy size={15} />
+                  </button>
+                  <button className="icon-button red" onClick={() => setDeleteId(file.id)} title="Delete">
+                    <Trash2 size={15} />
+                  </button>
+                </div>
               </div>
             )}
           </article>
@@ -803,13 +807,15 @@ function AdminScreen() {
       <div className="file-list">
         {invites.map((invite) => (
           <article className="file-row" key={invite.id}>
-            <div className="file-chip">INV</div>
-            <div className="file-main">
-              <strong>{invite.id}</strong>
-              <span>
-                {invite.uses}
-                {invite.maxUses ? ` of ${invite.maxUses}` : ""} uses · {invite.revokedAt ? "revoked" : "active"}
-              </span>
+            <div className="file-info">
+              <div className="file-chip">INV</div>
+              <div className="file-main">
+                <strong>{invite.id}</strong>
+                <span>
+                  {invite.uses}
+                  {invite.maxUses ? ` of ${invite.maxUses}` : ""} uses · {invite.revokedAt ? "revoked" : "active"}
+                </span>
+              </div>
             </div>
             {!invite.revokedAt && (
               <button className="icon-button red" onClick={() => revoke(invite.id)} title="Revoke">
