@@ -23,6 +23,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://localhost:8080",
       "/f": "http://localhost:8080",
+      "/d": "http://localhost:8080",
       "/p": "http://localhost:8080",
       "/healthz": "http://localhost:8080",
       "/readyz": "http://localhost:8080",

@@ -217,9 +217,12 @@ function AuthCard({
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const submitInFlightRef = useRef(false);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
     setLoading(true);
     setError("");
     try {
@@ -233,6 +236,7 @@ function AuthCard({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign in failed");
     } finally {
+      submitInFlightRef.current = false;
       setLoading(false);
     }
   }
@@ -291,6 +295,7 @@ function UploadScreen({ maxFileSizeBytes, onUploaded }: { maxFileSizeBytes: numb
   const [uploadError, setUploadError] = useState("");
   const [dragging, setDragging] = useState(false);
   const [toast, setToast] = useState("");
+  const pasteInFlightRef = useRef(false);
 
   const addFiles = useCallback(
     (files: FileList | File[]) => {
@@ -336,9 +341,12 @@ function UploadScreen({ maxFileSizeBytes, onUploaded }: { maxFileSizeBytes: numb
 
   async function submitPaste(event: React.FormEvent) {
     event.preventDefault();
+    if (pasteInFlightRef.current) return;
+    pasteInFlightRef.current = true;
     const pasteSizeBytes = new Blob([pasteText]).size;
     if (pasteSizeBytes > maxFileSizeBytes) {
       setPasteError(`Text file is too large. Max size is ${formatBytes(maxFileSizeBytes)}.`);
+      pasteInFlightRef.current = false;
       return;
     }
     setPasteLoading(true);
@@ -360,6 +368,7 @@ function UploadScreen({ maxFileSizeBytes, onUploaded }: { maxFileSizeBytes: numb
     } catch (err) {
       setPasteError(err instanceof Error ? err.message : "Paste failed");
     } finally {
+      pasteInFlightRef.current = false;
       setPasteLoading(false);
     }
   }
