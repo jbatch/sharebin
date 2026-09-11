@@ -7,6 +7,7 @@
   --line: rgba(49, 49, 49, 0.14);
   --sky: #7098c6;
   --amber: #c4923a;
+  --green: #4f8f67;
   --red: #b24035;
 }
 
@@ -513,6 +514,10 @@ textarea:focus {
   color: var(--sky);
 }
 
+.icon-button.green {
+  color: var(--green);
+}
+
 .icon-button.red {
   color: var(--red);
 }
@@ -638,6 +643,7 @@ textarea:focus {
 .file-row {
   min-height: 62px;
   padding: 12px 14px;
+  flex-wrap: wrap;
 }
 
 .file-info {
@@ -758,6 +764,12 @@ textarea:focus {
   border: 1px solid rgba(49, 49, 49, 0.12);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.58);
+}
+
+.file-delete-error {
+  width: 100%;
+  justify-content: flex-end;
+  margin-top: 0;
 }
 
 .confirm-delete button {

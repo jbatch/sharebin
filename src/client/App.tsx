@@ -709,6 +709,9 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
   const [linkState, setLinkState] = useState<"active" | "expired">("active");
   const [visibility, setVisibility] = useState<FileVisibility | "all">("all");
   const [sort, setSort] = useState("newest");
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<{ fileId: string; message: string } | null>(null);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ q, type, visibility, sort, archived: linkState === "expired" ? "true" : "false" });
@@ -722,6 +725,21 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
   }, [load, reloadSignal]);
 
   const storagePct = Math.min(100, Math.round((storage.usedBytes / storage.quotaBytes) * 100));
+
+  async function deleteFile(file: FileDto) {
+    setDeletingFileId(file.id);
+    setDeleteError(null);
+    try {
+      await api(`/api/files/${encodeURIComponent(file.id)}`, { method: "DELETE" });
+      setConfirmingDeleteId(null);
+      setFiles((current) => current.filter((item) => item.id !== file.id));
+      setStorage((current) => ({ ...current, usedBytes: Math.max(0, current.usedBytes - file.sizeBytes) }));
+    } catch (err) {
+      setDeleteError({ fileId: file.id, message: err instanceof Error ? err.message : "Delete failed" });
+    } finally {
+      setDeletingFileId(null);
+    }
+  }
 
   return (
     <section className="files-view">
@@ -801,7 +819,22 @@ function FilesScreen({ reloadSignal }: { reloadSignal: number }) {
                   <Download size={15} />
                 </a>
               </div>
+              {confirmingDeleteId === file.id ? (
+                <div className="link-action-group" aria-label={`Confirm delete ${file.originalFilename}`}>
+                  <button className="icon-button green" onClick={() => deleteFile(file)} title="Confirm delete" disabled={deletingFileId === file.id}>
+                    <Check size={15} />
+                  </button>
+                  <button className="icon-button red" onClick={() => setConfirmingDeleteId(null)} title="Cancel delete" disabled={deletingFileId === file.id}>
+                    <X size={15} />
+                  </button>
+                </div>
+              ) : (
+                <button className="icon-button red" onClick={() => setConfirmingDeleteId(file.id)} title="Delete">
+                  <Trash2 size={15} />
+                </button>
+              )}
             </div>
+            {deleteError?.fileId === file.id && <div className="row-error file-delete-error">{deleteError.message}</div>}
           </article>
         ))}
         {files.length === 0 && <div className="empty-state">No {linkState === "expired" ? "expired" : "active"} files match these filters.</div>}
